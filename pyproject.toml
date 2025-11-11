@@ -1,0 +1,32 @@
+[project]
+name = "tensor-decomposition"
+version = "0.1.0"
+description = "Complex tensor decomposition using deep learning"
+authors = [
+    { name = "Dashiell Stander", email = "dstander@protonmail.com" }
+]
+dependencies = [
+    "torch>=2.9.0",
+    "numpy>=2.3.4",
+    "scipy>=1.16.3",
+    "tqdm>=4.67.1",
+    "wandb>=0.22.3",
+    "safetensors>=0.6.2",
+    "boto3>=1.40.70",
+]
+readme = "README.md"
+requires-python = ">= 3.8"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
