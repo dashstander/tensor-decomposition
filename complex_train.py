@@ -8,14 +8,16 @@ import torch
 from tqdm import tqdm
 import wandb
 
-from src.config import Config
-from src.model import ComplexTensorDecompositionMLP
-from src.data import Rank1ComplexTensorDataset
-from src.losses import compute_loss
-from src.evaluation import evaluate_comprehensive
-from src.utils import get_lr_schedule_factor
-from src.device_utils import get_best_device, get_recommended_config_for_device
-from src.checkpoints import create_checkpoint_manager
+from src.tensor_decomposition.complex import (
+    Config,
+    ComplexTensorDecompositionMLP,
+    Rank1ComplexTensorDataset,
+    compute_loss,
+    evaluate_comprehensive,
+    get_lr_schedule_factor
+)
+from src.tensor_decomposition.device_utils import get_best_device, get_recommended_config_for_device
+from src.tensor_decomposition.checkpoints import create_checkpoint_manager
 
 
 def train(config):
