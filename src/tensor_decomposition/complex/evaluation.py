@@ -235,17 +235,24 @@ def evaluate_equivariance(model, config, metrics, results):
             # Reshape for model input: (n_orbit_samples, 1, tensor_size)
             T_transformed_flat = T_transformed.reshape(n_orbit_samples, 1, -1)
 
-            # Process each sample in the orbit
-            for i in range(n_orbit_samples):
-                sample_tensor = T_transformed_flat[i]  # (1, tensor_size)
-                sample_factors = [f[i] for f in factors_transformed]  # Each (1, data_dim)
+            # Process entire orbit in one batch
+            # Reshape for batch inference: (n_orbit_samples, tensor_size)
+            T_batch = T_transformed_flat.squeeze(1)  # Remove the singleton dimension
+            factors_true_batch = [f.squeeze(1) for f in factors_transformed]  # Each (n_orbit_samples, data_dim)
 
-                # Get model predictions
-                factors_pred = model(sample_tensor)
+            # Get model predictions for entire orbit at once
+            factors_pred_batch = model(T_batch)
 
-                # Compute loss against transformed factors
-                factor_loss = factor_cosine_distance(factors_pred, sample_factors)
-                orbit_losses.append(factor_loss.item())
+            # Compute factor cosine distances for entire batch
+            total_loss = 0
+            for pred_factor, true_factor in zip(factors_pred_batch, factors_true_batch):
+                # Factors are already normalized, compute cosine similarity
+                cosine_sim = (pred_factor * true_factor.conj()).sum(dim=-1).real
+                factor_losses = 1 - cosine_sim  # Per-sample losses
+                total_loss += factor_losses
+
+            avg_factor_loss = total_loss / len(factors_pred_batch)  # Average across factors
+            orbit_losses.extend(avg_factor_loss.cpu().numpy())
 
             # Compute mean and variance of losses across the orbit
             orbit_losses = np.array(orbit_losses)
