@@ -8,12 +8,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import torch
 import boto3
-from safetensors.torch import save, load
 from botocore.exceptions import NoCredentialsError, ClientError
 
 
 class S3CheckpointManager:
-    """Manages saving and loading checkpoints to/from S3 using safetensors."""
+    """Manages saving and loading checkpoints to/from S3."""
 
     def __init__(self, bucket_name: str, prefix: str = "checkpoints",
                  aws_access_key_id: Optional[str] = None,
@@ -56,7 +55,7 @@ class S3CheckpointManager:
 
     def _get_checkpoint_key(self, checkpoint_name: str) -> str:
         """Generate S3 key for checkpoint."""
-        return f"{self.prefix}/{checkpoint_name}.safetensors"
+        return f"{self.prefix}/{checkpoint_name}.pt"
 
     def save_checkpoint(self,
                        model: torch.nn.Module,
@@ -67,7 +66,7 @@ class S3CheckpointManager:
                        checkpoint_name: Optional[str] = None,
                        metadata: Optional[Dict[str, Any]] = None) -> str:
         """
-        Save model and optimizer state to S3 using safetensors format.
+        Save model and optimizer state to S3 using PyTorch format.
 
         Args:
             model: PyTorch model
@@ -85,27 +84,23 @@ class S3CheckpointManager:
             timestamp = int(time.time())
             checkpoint_name = f"checkpoint_batch_{batch_idx:06d}_{timestamp}"
 
-        # Prepare state dict
-        state_dict = {
-            # Model parameters (safetensors format)
-            **{f"model.{k}": v for k, v in model.state_dict().items()},
+        # Prepare checkpoint dictionary with all components
+        checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'batch_idx': batch_idx,
+            'loss': loss,
+            'timestamp': int(time.time()),
+            'model_class': model.__class__.__name__,
+            'optimizer_class': optimizer.__class__.__name__,
+            'device': str(next(model.parameters()).device),
         }
 
-        # Prepare metadata dictionary
-        metadata_dict = {
-            "batch_idx": batch_idx,
-            "loss": loss,
-            "timestamp": int(time.time()),
-            "model_class": model.__class__.__name__,
-            "optimizer_class": optimizer.__class__.__name__,
-            "device": str(next(model.parameters()).device),
-        }
-
-        # Add config to metadata
+        # Add config to checkpoint
         if hasattr(config, '__dict__'):
             config_dict = {}
             for k, v in config.__dict__.items():
-                # Convert all config values to JSON-serializable format
+                # Convert all config values to serializable format
                 if hasattr(v, 'dtype') and hasattr(v, 'device'):  # torch tensors
                     config_dict[k] = str(v)
                 elif callable(v):  # functions
@@ -116,48 +111,29 @@ class S3CheckpointManager:
                         config_dict[k] = v
                     except (TypeError, ValueError):
                         config_dict[k] = str(v)
-            metadata_dict["config"] = config_dict
+            checkpoint['config'] = config_dict
 
         # Add custom metadata
         if metadata:
-            metadata_dict["custom"] = metadata
-
-        # Convert entire metadata to a single JSON string for safetensors
-        checkpoint_metadata = {
-            "metadata": json.dumps(metadata_dict)
-        }
+            checkpoint['custom_metadata'] = metadata
 
         try:
-            # Save model state to bytes buffer using safetensors
-            model_buffer = io.BytesIO()
-            save(state_dict, model_buffer, metadata=checkpoint_metadata)
-            model_buffer.seek(0)
+            # Save checkpoint to bytes buffer
+            checkpoint_buffer = io.BytesIO()
+            torch.save(checkpoint, checkpoint_buffer)
+            checkpoint_buffer.seek(0)
 
-            # Save optimizer state separately (pickle format for now)
-            optimizer_buffer = io.BytesIO()
-            torch.save(optimizer.state_dict(), optimizer_buffer)
-            optimizer_buffer.seek(0)
-
-            # Upload model to S3
-            model_key = self._get_checkpoint_key(f"{checkpoint_name}_model")
+            # Upload to S3
+            checkpoint_key = self._get_checkpoint_key(checkpoint_name)
             self.s3_client.upload_fileobj(
-                model_buffer,
+                checkpoint_buffer,
                 self.bucket_name,
-                model_key,
+                checkpoint_key,
                 ExtraArgs={'ContentType': 'application/octet-stream'}
             )
 
-            # Upload optimizer to S3
-            optimizer_key = self._get_checkpoint_key(f"{checkpoint_name}_optimizer")
-            self.s3_client.upload_fileobj(
-                optimizer_buffer,
-                self.bucket_name,
-                optimizer_key,
-                ExtraArgs={'ContentType': 'application/octet-stream'}
-            )
-
-            print(f"Checkpoint saved to S3: s3://{self.bucket_name}/{model_key}")
-            return model_key
+            print(f"Checkpoint saved to S3: s3://{self.bucket_name}/{checkpoint_key}")
+            return checkpoint_key
 
         except Exception as e:
             print(f"Failed to save checkpoint to S3: {e}")
@@ -181,57 +157,35 @@ class S3CheckpointManager:
             Dictionary with metadata and loading info
         """
         try:
-            # Download model checkpoint
-            model_key = self._get_checkpoint_key(f"{checkpoint_name}_model")
-            model_buffer = io.BytesIO()
-            self.s3_client.download_fileobj(self.bucket_name, model_key, model_buffer)
-            model_buffer.seek(0)
+            # Download checkpoint
+            checkpoint_key = self._get_checkpoint_key(checkpoint_name)
+            checkpoint_buffer = io.BytesIO()
+            self.s3_client.download_fileobj(self.bucket_name, checkpoint_key, checkpoint_buffer)
+            checkpoint_buffer.seek(0)
+
+            # Load checkpoint
+            checkpoint = torch.load(checkpoint_buffer, map_location=device)
 
             # Load model state
-            state_dict, raw_metadata = load(model_buffer, return_metadata=True)
-
-            # Parse metadata from JSON string
-            metadata = {}
-            if raw_metadata and 'metadata' in raw_metadata:
-                try:
-                    metadata = json.loads(raw_metadata['metadata'])
-                except json.JSONDecodeError:
-                    print(f"⚠️ Failed to parse checkpoint metadata")
-                    metadata = {}
-
-            # Extract model parameters
-            model_state = {}
-            for key, value in state_dict.items():
-                if key.startswith('model.'):
-                    model_key_name = key[6:]  # Remove 'model.' prefix
-                    model_state[model_key_name] = value
-
-            # Load into model
-            if device:
-                model_state = {k: v.to(device) for k, v in model_state.items()}
-            model.load_state_dict(model_state)
+            model.load_state_dict(checkpoint['model_state_dict'])
 
             # Load optimizer if provided
-            if optimizer:
-                try:
-                    optimizer_key = self._get_checkpoint_key(f"{checkpoint_name}_optimizer")
-                    optimizer_buffer = io.BytesIO()
-                    self.s3_client.download_fileobj(self.bucket_name, optimizer_key, optimizer_buffer)
-                    optimizer_buffer.seek(0)
+            if optimizer and 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f"✅ Loaded optimizer state from S3")
 
-                    optimizer_state = torch.load(optimizer_buffer, map_location=device)
-                    optimizer.load_state_dict(optimizer_state)
-                    print(f"✅ Loaded optimizer state from S3")
-                except Exception as e:
-                    print(f"⚠️ Failed to load optimizer state: {e}")
+            print(f"✅ Checkpoint loaded from S3: s3://{self.bucket_name}/{checkpoint_key}")
 
-            print(f"✅ Checkpoint loaded from S3: s3://{self.bucket_name}/{model_key}")
+            # Return metadata
             return {
-                'metadata': metadata,
-                'batch_idx': metadata.get('batch_idx', 0),
-                'loss': metadata.get('loss', 0.0),
-                'timestamp': metadata.get('timestamp', 0),
-                'config': metadata.get('config', {})
+                'batch_idx': checkpoint.get('batch_idx', 0),
+                'loss': checkpoint.get('loss', 0.0),
+                'timestamp': checkpoint.get('timestamp', 0),
+                'config': checkpoint.get('config', {}),
+                'custom_metadata': checkpoint.get('custom_metadata', {}),
+                'model_class': checkpoint.get('model_class', ''),
+                'optimizer_class': checkpoint.get('optimizer_class', ''),
+                'device': checkpoint.get('device', '')
             }
 
         except Exception as e:
@@ -250,8 +204,8 @@ class S3CheckpointManager:
             checkpoints = []
             for obj in response.get('Contents', []):
                 key = obj['Key']
-                if key.endswith('_model.safetensors'):
-                    checkpoint_name = key.replace(f"{self.prefix}/", "").replace('_model.safetensors', '')
+                if key.endswith('.pt'):
+                    checkpoint_name = key.replace(f"{self.prefix}/", "").replace('.pt', '')
                     checkpoints.append({
                         'name': checkpoint_name,
                         'key': key,
@@ -268,18 +222,9 @@ class S3CheckpointManager:
     def delete_checkpoint(self, checkpoint_name: str) -> bool:
         """Delete a checkpoint from S3."""
         try:
-            # Delete both model and optimizer files
-            model_key = self._get_checkpoint_key(f"{checkpoint_name}_model")
-            optimizer_key = self._get_checkpoint_key(f"{checkpoint_name}_optimizer")
-
-            # Delete model file
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=model_key)
-
-            # Delete optimizer file (might not exist)
-            try:
-                self.s3_client.delete_object(Bucket=self.bucket_name, Key=optimizer_key)
-            except:
-                pass
+            # Delete checkpoint file
+            checkpoint_key = self._get_checkpoint_key(checkpoint_name)
+            self.s3_client.delete_object(Bucket=self.bucket_name, Key=checkpoint_key)
 
             print(f"✅ Deleted checkpoint: {checkpoint_name}")
             return True
