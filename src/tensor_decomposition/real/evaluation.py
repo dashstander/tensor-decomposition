@@ -20,16 +20,11 @@ def evaluate_comprehensive(model, config, n_test_batches=20):
     Returns:
         Dictionary of evaluation metrics
     """
-    import time
-    eval_start_time = time.time()
-
     # Set random seed for reproducibility
     torch.manual_seed(config.seed + 1)
     np.random.seed(config.seed + 1)
 
     model.eval()
-
-    print(f"\n[EVAL] Starting comprehensive evaluation with {n_test_batches} test batches")
 
     # We need to generate specific types of tensors for analysis
     metrics = {
@@ -41,14 +36,8 @@ def evaluate_comprehensive(model, config, n_test_batches=20):
         'equivariance': {'losses': [], 'variances': []},
     }
 
-    batch_generation_time = 0
-    forward_pass_time = 0
-    loss_computation_time = 0
-
     with torch.no_grad():
         for batch_idx in range(n_test_batches):
-            batch_start = time.time()
-
             # Generate batch with known structure
             batch_size = config.batch_size
 
@@ -112,18 +101,12 @@ def evaluate_comprehensive(model, config, n_test_batches=20):
             factors_true = [torch.cat(factor_list, dim=0).to(config.device) for factor_list in factors_true_list]
             tensor_types = torch.tensor(tensor_types).to(config.device)
 
-            batch_generation_time += time.time() - batch_start
-
             # Get predictions
-            forward_start = time.time()
             factors_pred = model(T_flat)
-            forward_pass_time += time.time() - forward_start
 
             # Compute losses
-            loss_start = time.time()
             factor_loss = factor_cosine_distance(factors_pred, factors_true)
             recon_loss = reconstruction_mse(factors_pred, T_flat, config)
-            loss_computation_time += time.time() - loss_start
 
             # Overall metrics
             metrics['overall']['factor_loss'].append(factor_loss.item())
@@ -194,24 +177,8 @@ def evaluate_comprehensive(model, config, n_test_batches=20):
         results['correlations/factor_0_2'] = np.corrcoef(factor_0_losses, factor_2_losses)[0, 1]
         results['correlations/factor_1_2'] = np.corrcoef(factor_1_losses, factor_2_losses)[0, 1]
 
-    # Print timing for main evaluation
-    main_eval_time = time.time() - eval_start_time
-    print(f"[EVAL] Main evaluation completed in {main_eval_time:.2f}s")
-    print(f"  - Batch generation: {batch_generation_time:.2f}s ({batch_generation_time/main_eval_time*100:.1f}%)")
-    print(f"  - Forward passes: {forward_pass_time:.2f}s ({forward_pass_time/main_eval_time*100:.1f}%)")
-    print(f"  - Loss computation: {loss_computation_time:.2f}s ({loss_computation_time/main_eval_time*100:.1f}%)")
-
     # SO(n) Equivariance Test
-    print(f"[EVAL] Starting equivariance evaluation...")
-    equivariance_start = time.time()
     evaluate_equivariance(model, config, metrics, results)
-    equivariance_time = time.time() - equivariance_start
-    print(f"[EVAL] Equivariance evaluation completed in {equivariance_time:.2f}s")
-
-    total_eval_time = time.time() - eval_start_time
-    print(f"[EVAL] Total evaluation time: {total_eval_time:.2f}s")
-    print(f"  - Main eval: {main_eval_time:.2f}s ({main_eval_time/total_eval_time*100:.1f}%)")
-    print(f"  - Equivariance: {equivariance_time:.2f}s ({equivariance_time/total_eval_time*100:.1f}%)")
 
     model.train()
     return results
@@ -227,36 +194,20 @@ def evaluate_equivariance(model, config, metrics, results):
         metrics: Dictionary to store metrics
         results: Dictionary to store results
     """
-    import time
-
     n_equivariance_samples = 100  # Number of base tensors to test
     n_orbit_samples = 1000  # Number of SO(n) transformations per tensor
 
-    print(f"[EQUIVAR] Testing {n_equivariance_samples} base tensors with {n_orbit_samples} SO(n) transformations each")
-
     equivariance_losses_per_tensor = []
-
-    haar_time = 0
-    tensor_gen_time = 0
-    transformation_time = 0
-    model_inference_time = 0
 
     with torch.no_grad():
         for sample_idx in range(n_equivariance_samples):
-            if sample_idx % 10 == 0:
-                print(f"[EQUIVAR] Processing sample {sample_idx}/{n_equivariance_samples}")
-
             # Generate a random test tensor
-            tensor_start = time.time()
             dataset = Rank1RealTensorDataset(config, 1)
             factors_base = [dataset.sample(1) for _ in range(3)]
             factors_base = dataset.fix_gauge(factors_base)
-            tensor_gen_time += time.time() - tensor_start
 
             # Generate all SO(n) matrices for this orbit at once
-            haar_start = time.time()
             O_batch = haar_measure(config.data_dim, batch_size=n_orbit_samples).to(config.device)
-            haar_time += time.time() - haar_start
 
             # Prepare base factors for batched transformation
             factors_base_device = [factor.to(config.device) for factor in factors_base]
@@ -265,7 +216,6 @@ def evaluate_equivariance(model, config, metrics, results):
             orbit_losses = []
 
             # Transform factors: O @ factor^T
-            transform_start = time.time()
             factors_transformed = []
             for factor in factors_base_device:
                 # factor shape: (1, data_dim), O_batch shape: (n_orbit_samples, data_dim, data_dim)
@@ -280,10 +230,8 @@ def evaluate_equivariance(model, config, metrics, results):
                                        factors_transformed[2])
             # Reshape for model input: (n_orbit_samples, 1, tensor_size)
             T_transformed_flat = T_transformed.reshape(n_orbit_samples, 1, -1)
-            transformation_time += time.time() - transform_start
 
             # Process entire orbit in one batch
-            inference_start = time.time()
 
             # Reshape for batch inference: (n_orbit_samples, tensor_size)
             T_batch = T_transformed_flat.squeeze(1)  # Remove the singleton dimension
@@ -303,8 +251,6 @@ def evaluate_equivariance(model, config, metrics, results):
             avg_factor_loss = total_loss / len(factors_pred_batch)  # Average across factors
             orbit_losses.extend(avg_factor_loss.cpu().numpy())
 
-            model_inference_time += time.time() - inference_start
-
             # Compute mean and variance of losses across the orbit
             orbit_losses = np.array(orbit_losses)
             mean_loss = np.mean(orbit_losses)
@@ -313,15 +259,6 @@ def evaluate_equivariance(model, config, metrics, results):
             metrics['equivariance']['losses'].append(mean_loss)
             metrics['equivariance']['variances'].append(var_loss)
             equivariance_losses_per_tensor.append(orbit_losses)
-
-    # Print timing breakdown
-    total_samples = n_equivariance_samples * n_orbit_samples
-    print(f"[EQUIVAR] Timing breakdown:")
-    print(f"  - Tensor generation: {tensor_gen_time:.2f}s")
-    print(f"  - Haar measure: {haar_time:.2f}s")
-    print(f"  - Transformations: {transformation_time:.2f}s")
-    print(f"  - Model inference: {model_inference_time:.2f}s ({total_samples} samples)")
-    print(f"  - Avg per sample: {model_inference_time/total_samples*1000:.2f}ms")
 
     # Compute equivariance statistics
     if metrics['equivariance']['losses']:

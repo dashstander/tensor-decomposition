@@ -3,6 +3,7 @@
 import os
 import io
 import time
+import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 import torch
@@ -90,26 +91,41 @@ class S3CheckpointManager:
             **{f"model.{k}": v for k, v in model.state_dict().items()},
         }
 
-        # Prepare metadata
-        checkpoint_metadata = {
-            "batch_idx": str(batch_idx),
-            "loss": str(loss),
-            "timestamp": str(int(time.time())),
+        # Prepare metadata dictionary
+        metadata_dict = {
+            "batch_idx": batch_idx,
+            "loss": loss,
+            "timestamp": int(time.time()),
             "model_class": model.__class__.__name__,
             "optimizer_class": optimizer.__class__.__name__,
             "device": str(next(model.parameters()).device),
         }
 
-        # Add config info
+        # Add config to metadata
         if hasattr(config, '__dict__'):
+            config_dict = {}
             for k, v in config.__dict__.items():
-                if isinstance(v, (str, int, float, bool)):
-                    checkpoint_metadata[f"config.{k}"] = str(v)
+                # Convert all config values to JSON-serializable format
+                if hasattr(v, 'dtype') and hasattr(v, 'device'):  # torch tensors
+                    config_dict[k] = str(v)
+                elif callable(v):  # functions
+                    config_dict[k] = str(v)
+                else:
+                    try:
+                        json.dumps(v)  # Test if JSON serializable
+                        config_dict[k] = v
+                    except (TypeError, ValueError):
+                        config_dict[k] = str(v)
+            metadata_dict["config"] = config_dict
 
         # Add custom metadata
         if metadata:
-            for k, v in metadata.items():
-                checkpoint_metadata[f"metadata.{k}"] = str(v)
+            metadata_dict["custom"] = metadata
+
+        # Convert entire metadata to a single JSON string for safetensors
+        checkpoint_metadata = {
+            "metadata": json.dumps(metadata_dict)
+        }
 
         try:
             # Save model state to bytes buffer using safetensors
@@ -172,8 +188,16 @@ class S3CheckpointManager:
             model_buffer.seek(0)
 
             # Load model state
-            state_dict = load(model_buffer)
-            metadata = getattr(state_dict, 'metadata', {})
+            state_dict, raw_metadata = load(model_buffer, return_metadata=True)
+
+            # Parse metadata from JSON string
+            metadata = {}
+            if raw_metadata and 'metadata' in raw_metadata:
+                try:
+                    metadata = json.loads(raw_metadata['metadata'])
+                except json.JSONDecodeError:
+                    print(f"⚠️ Failed to parse checkpoint metadata")
+                    metadata = {}
 
             # Extract model parameters
             model_state = {}
@@ -204,9 +228,10 @@ class S3CheckpointManager:
             print(f"✅ Checkpoint loaded from S3: s3://{self.bucket_name}/{model_key}")
             return {
                 'metadata': metadata,
-                'batch_idx': int(metadata.get('batch_idx', 0)),
-                'loss': float(metadata.get('loss', 0.0)),
-                'timestamp': int(metadata.get('timestamp', 0)),
+                'batch_idx': metadata.get('batch_idx', 0),
+                'loss': metadata.get('loss', 0.0),
+                'timestamp': metadata.get('timestamp', 0),
+                'config': metadata.get('config', {})
             }
 
         except Exception as e:
