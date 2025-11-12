@@ -216,41 +216,33 @@ def evaluate_equivariance(model, config, metrics, results):
             # Apply O to each factor in batch: O_batch @ factor
             orbit_losses = []
 
-            # Process in smaller chunks to avoid memory issues
-            chunk_size = 100
-            for chunk_start in range(0, n_orbit_samples, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, n_orbit_samples)
-                chunk_size_actual = chunk_end - chunk_start
+            # Transform factors: O @ factor^T
+            factors_transformed = []
+            for factor in factors_base_device:
+                # factor shape: (1, data_dim), O_batch shape: (n_orbit_samples, data_dim, data_dim)
+                factor_expanded = factor.expand(n_orbit_samples, -1, -1)  # (n_orbit_samples, 1, data_dim)
+                transformed = torch.bmm(factor_expanded, O_batch.transpose(-2, -1))  # (n_orbit_samples, 1, data_dim)
+                factors_transformed.append(transformed)
 
-                O_chunk = O_batch[chunk_start:chunk_end]  # (chunk_size, data_dim, data_dim)
+            # Construct transformed tensors in batch
+            T_transformed = torch.einsum('bki,bkj,bkl->bkijl',
+                                       factors_transformed[0],
+                                       factors_transformed[1],
+                                       factors_transformed[2])
+            # Reshape for model input: (n_orbit_samples, 1, tensor_size)
+            T_transformed_flat = T_transformed.reshape(n_orbit_samples, 1, -1)
 
-                # Transform factors: O @ factor^T
-                factors_transformed = []
-                for factor in factors_base_device:
-                    # factor shape: (1, data_dim), O_chunk shape: (chunk_size, data_dim, data_dim)
-                    factor_expanded = factor.expand(chunk_size_actual, -1, -1)  # (chunk_size, 1, data_dim)
-                    transformed = torch.bmm(factor_expanded, O_chunk.transpose(-2, -1))  # (chunk_size, 1, data_dim)
-                    factors_transformed.append(transformed)
+            # Process each sample in the orbit
+            for i in range(n_orbit_samples):
+                sample_tensor = T_transformed_flat[i]  # (1, tensor_size)
+                sample_factors = [f[i] for f in factors_transformed]  # Each (1, data_dim)
 
-                # Construct transformed tensors in batch
-                T_transformed = torch.einsum('bki,bkj,bkl->bkijl',
-                                           factors_transformed[0],
-                                           factors_transformed[1],
-                                           factors_transformed[2])
-                # Reshape for model input: (chunk_size, 1, tensor_size)
-                T_transformed_flat = T_transformed.reshape(chunk_size_actual, 1, -1)
+                # Get model predictions
+                factors_pred = model(sample_tensor)
 
-                # Process each sample in the chunk
-                for i in range(chunk_size_actual):
-                    sample_tensor = T_transformed_flat[i]  # (1, tensor_size)
-                    sample_factors = [f[i] for f in factors_transformed]  # Each (1, data_dim)
-
-                    # Get model predictions
-                    factors_pred = model(sample_tensor)
-
-                    # Compute loss against transformed factors
-                    factor_loss = factor_cosine_distance(factors_pred, sample_factors)
-                    orbit_losses.append(factor_loss.item())
+                # Compute loss against transformed factors
+                factor_loss = factor_cosine_distance(factors_pred, sample_factors)
+                orbit_losses.append(factor_loss.item())
 
             # Compute mean and variance of losses across the orbit
             orbit_losses = np.array(orbit_losses)
