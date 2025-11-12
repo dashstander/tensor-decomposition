@@ -1,0 +1,35 @@
+# Small configuration for complex tensor decomposition testing
+
+# Basic parameters
+seed: 42
+data_dim: 2
+order: 3
+sigma: 1.0
+
+# Training parameters
+n_train_batches: 100
+batch_size: 32
+lr: 0.001
+hidden_dim: 64
+n_layers: 2
+dtype: "complex64"
+
+# Loss configuration
+loss_type: "combined"
+loss_weight: 0.7
+
+# Model configuration
+use_widely_linear: true
+
+# Learning rate scheduling
+use_lr_schedule: false
+
+# Logging and evaluation
+log_interval: 10
+eval_interval: 50
+
+# Device configuration
+device: "cpu"
+
+# Weights & Biases logging
+use_wandb: false

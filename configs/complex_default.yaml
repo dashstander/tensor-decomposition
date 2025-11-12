@@ -1,0 +1,49 @@
+# Default configuration for complex tensor decomposition training
+
+# Basic parameters
+seed: 0
+data_dim: 2
+order: 3
+sigma: 1.0
+
+# Training parameters
+n_train_batches: 10000
+batch_size: 1024  # 2^10
+lr: 0.005
+hidden_dim: 512
+n_layers: 4
+dtype: "complex64"  # Will be converted to torch.complex64
+
+# Loss configuration
+loss_type: "factor"  # Options: "factor", "reconstruction", "combined"
+loss_weight: 0.5  # Weight for factor loss when using "combined"
+
+# Model configuration
+use_widely_linear: true
+
+# Learning rate scheduling
+use_lr_schedule: true
+warmup_batches: 1000
+decay_start_batch: 5000
+
+# Logging and evaluation
+log_interval: 10
+eval_interval: 500
+
+# Device configuration (will be auto-detected if not specified)
+# device: "auto"  # Options: "auto", "cpu", "cuda", "mps"
+
+# Weights & Biases logging
+use_wandb: false
+wandb_project: "tensor-decomposition"
+wandb_name: null  # Auto-generated if null
+
+# S3 Checkpointing (optional)
+use_s3_checkpoints: false
+s3_bucket: null
+s3_prefix: "tensor-decomposition"
+checkpoint_interval: 1000
+keep_last_n_checkpoints: 5
+aws_region: "us-east-1"
+# aws_access_key_id: null  # Use environment variables
+# aws_secret_access_key: null  # Use environment variables

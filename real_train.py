@@ -7,6 +7,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import wandb
+import yaml
+import argparse
+from pathlib import Path
 
 from src.tensor_decomposition.real import (
     Config,
@@ -18,6 +21,34 @@ from src.tensor_decomposition.real import (
 )
 from src.tensor_decomposition.device_utils import get_best_device, get_recommended_config_for_device
 from src.tensor_decomposition.checkpoints import create_checkpoint_manager
+
+
+def load_config_from_yaml(yaml_path):
+    """Load configuration from YAML file."""
+    with open(yaml_path, 'r') as f:
+        config_dict = yaml.safe_load(f)
+
+    # Convert dtype string to torch dtype
+    if 'dtype' in config_dict:
+        dtype_str = config_dict['dtype']
+        if dtype_str == 'float32':
+            config_dict['dtype'] = torch.float32
+        elif dtype_str == 'float64':
+            config_dict['dtype'] = torch.float64
+        elif dtype_str == 'complex64':
+            config_dict['dtype'] = torch.complex64
+        elif dtype_str == 'complex128':
+            config_dict['dtype'] = torch.complex128
+        else:
+            raise ValueError(f"Unknown dtype: {dtype_str}")
+
+    # Handle device auto-detection
+    if config_dict.get('device') == 'auto' or 'device' not in config_dict:
+        config_dict['device'] = get_best_device()
+        device_config = get_recommended_config_for_device(config_dict['device'])
+        config_dict.update(device_config)
+
+    return Config(**config_dict)
 
 
 def train(config):
@@ -204,43 +235,49 @@ def train(config):
 
 def main():
     """Main training function."""
-    # Auto-detect best device or override manually
-    device = get_best_device()  # Change this to 'cpu', 'cuda', or 'mps' to override
-    device_config = get_recommended_config_for_device(device)
+    parser = argparse.ArgumentParser(description='Train real tensor decomposition model')
+    parser.add_argument('--config', type=str, default='configs/real_default.yaml',
+                        help='Path to YAML configuration file')
+    parser.add_argument('--override', type=str, nargs='*', default=[],
+                        help='Override config parameters (e.g., --override lr=0.001 batch_size=512)')
 
-    print(f"Using device: {device}")
-    print(f"Recommended config adjustments: {device_config}")
+    args = parser.parse_args()
 
-    # Base configuration
-    base_config = {
-        'seed': 0,
-        'data_dim': 2,
-        'order': 3,
-        'sigma': 1.0,
-        'n_train_batches': 10_000,
-        'batch_size': 2**10,  # 1024
-        'lr': 5.0e-3,
-        'hidden_dim': 512,
-        'n_layers': 4,
-        'dtype': torch.float32,  # Real tensors
-        'loss_type': 'factor',  # 'factor', 'reconstruction', or 'combined'
-        'loss_weight': 0.5,  # Weight for factor loss when using 'combined'
-        'use_lr_schedule': True,
-        'warmup_batches': 1000,
-        'decay_start_batch': 5000,
-        'log_interval': 10,
-        'eval_interval': 500,
-        'device': device,
-        'use_wandb': False,  # Set to True to enable wandb logging
-        'wandb_project': "real-tensor-decomposition",
-        'wandb_name': None
-    }
+    # Load config from YAML
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    # Apply device-specific overrides
-    base_config.update(device_config)
+    config = load_config_from_yaml(config_path)
 
-    # Create config
-    config = Config(**base_config)
+    # Apply command-line overrides
+    if args.override:
+        overrides = {}
+        for override in args.override:
+            key, value = override.split('=', 1)
+            # Try to convert to appropriate type
+            try:
+                # Try int first, then float, then bool, else keep as string
+                if '.' in value:
+                    value = float(value)
+                elif value.lower() in ('true', 'false'):
+                    value = value.lower() == 'true'
+                else:
+                    value = int(value)
+            except ValueError:
+                pass  # Keep as string
+            overrides[key] = value
+
+        # Update config with overrides
+        for key, value in overrides.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+                print(f"Override: {key} = {value}")
+            else:
+                print(f"Warning: Unknown config parameter '{key}' ignored")
+
+    print(f"Loaded config from: {config_path}")
+    print(f"Using device: {config.device}")
 
     print(f"\nTraining Configuration:")
     print(f"  Device: {config.device}")
